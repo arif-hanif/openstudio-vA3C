@@ -292,11 +292,15 @@ class VA3C
 
     # get the transformation to site coordinates
     site_transformation = OpenStudio::Transformation.new
-    planar_surface_group = surface.planarSurfaceGroup
-    if not planar_surface_group.empty?
-      site_transformation = planar_surface_group.get.siteTransformation
+    building = surface.model.getBuilding
+    
+    space = surface.space
+    if space.is_initialized
+      site_transformation = building.transformation*space.get.transformation
+    else
+      site_transformation = building.transformation
     end
-
+    
     # get the vertices
     surface_vertices = surface.vertices
     t = OpenStudio::Transformation::alignFace(surface_vertices)
@@ -367,9 +371,11 @@ class VA3C
       surface_user_data.outsideBoundaryConditionObjectHandle = format_uuid(adjacent_surface.get.handle)
       
       other_site_transformation = OpenStudio::Transformation.new
-      other_group = adjacent_surface.get.planarSurfaceGroup
-      if not other_group.empty?
-        other_site_transformation = other_group.get.siteTransformation
+      other_space = adjacent_surface.get.space
+      if not other_space.empty?
+        other_site_transformation = building.transformation*other_space.get.transformation
+      else
+        other_site_transformation = building.transformation
       end
       
       other_vertices = other_site_transformation*adjacent_surface.get.vertices
@@ -502,9 +508,11 @@ class VA3C
         sub_surface_user_data.outsideBoundaryConditionObjectHandle = format_uuid(adjacent_sub_surface.get.handle)
       
         other_site_transformation = OpenStudio::Transformation.new
-        other_group = adjacent_sub_surface.get.planarSurfaceGroup
-        if not other_group.empty?
-          other_site_transformation = other_group.get.siteTransformation
+        other_space = adjacent_sub_surface.get.space
+        if not other_space.empty?
+          other_site_transformation = building.transformation*other_space.get.transformation
+        else
+          other_site_transformation = building.transformation
         end
         
         other_vertices = other_site_transformation*adjacent_sub_surface.get.vertices
@@ -562,10 +570,8 @@ class VA3C
 
     # get the transformation to site coordinates
     site_transformation = OpenStudio::Transformation.new
-    planar_surface_group = surface.planarSurfaceGroup
-    if not planar_surface_group.empty?
-      site_transformation = planar_surface_group.get.siteTransformation
-    end
+    building = surface.model.getBuilding
+    
     shading_surface_group = surface.shadingSurfaceGroup
     shading_surface_type = 'Building'
     space_name = nil
@@ -594,7 +600,15 @@ class VA3C
         if building_story.is_initialized
           building_story_name = building_story.get.name.to_s
         end
+        
+        site_transformation = building.transformation*space.transformation*shading_surface_group.get.transformation
+      elsif /Site/i.match(shading_surface_type)
+        site_transformation = shading_surface_group.get.transformation
+      else
+        site_transformation = building.transformation*shading_surface_group.get.transformation
       end
+      
+      
     end
     
     # get the vertices
@@ -703,10 +717,7 @@ class VA3C
 
     # get the transformation to site coordinates
     site_transformation = OpenStudio::Transformation.new
-    planar_surface_group = surface.planarSurfaceGroup
-    if not planar_surface_group.empty?
-      site_transformation = planar_surface_group.get.siteTransformation
-    end
+    building = surface.model.getBuilding
     interior_partition_surface_group = surface.interiorPartitionSurfaceGroup
 
     space_name = nil
@@ -734,6 +745,10 @@ class VA3C
         if building_story.is_initialized
           building_story_name = building_story.get.name.to_s
         end
+        
+        site_transformation = building.transformation*space.transformation*interior_partition_surface_group.get.transformation
+      else
+        site_transformation = building.transformation*interior_partition_surface_group.get.transformation
       end
     end
     
@@ -875,67 +890,69 @@ class VA3C
       end
   
       geometries, user_datas = make_geometries(surface)
-      geometries.each_index do |i| 
-        geometry = geometries[i]
-        user_data = user_datas[i]
-        
-        all_geometries << geometry
+      if geometries
+        geometries.each_index do |i| 
+          geometry = geometries[i]
+          user_data = user_datas[i]
+          
+          all_geometries << geometry
 
-        scene_child = SceneChild.new
-        scene_child.uuid = format_uuid(OpenStudio::createUUID) 
-        scene_child.name = user_data[:name]
-        scene_child.type = "Mesh"
-        scene_child.geometry = geometry[:uuid]
+          scene_child = SceneChild.new
+          scene_child.uuid = format_uuid(OpenStudio::createUUID) 
+          scene_child.name = user_data[:name]
+          scene_child.type = "Mesh"
+          scene_child.geometry = geometry[:uuid]
 
-        if i == 0
-          # first geometry is base surface
-          scene_child.material = material[:uuid]
-        else
-          # sub surface
-          if /Window/.match(user_data[:surfaceType]) || /Glass/.match(user_data[:surfaceType]) 
-            scene_child.material =  window_material[:uuid]
+          if i == 0
+            # first geometry is base surface
+            scene_child.material = material[:uuid]
           else
-            scene_child.material =  door_material[:uuid]
+            # sub surface
+            if /Window/.match(user_data[:surfaceType]) || /Glass/.match(user_data[:surfaceType]) 
+              scene_child.material =  window_material[:uuid]
+            else
+              scene_child.material =  door_material[:uuid]
+            end
           end
+          
+          scene_child.matrix = identity_matrix
+          scene_child.userData = user_data
+          object[:children] << scene_child.to_h
         end
-        
-        scene_child.matrix = identity_matrix
-        scene_child.userData = user_data
-        object[:children] << scene_child.to_h
       end
-      
     end
     
     # loop over all shading surfaces
     model.getShadingSurfaces.each do |surface|
   
       geometries, user_datas = make_shade_geometries(surface)
-      geometries.each_index do |i| 
-        geometry = geometries[i]
-        user_data = user_datas[i]
-        
-        material = nil
-        if /Site/.match(user_data[:surfaceType])
-          material = site_shading_material
-        elsif /Building/.match(user_data[:surfaceType]) 
-          material = building_shading_material
-        elsif /Space/.match(user_data[:surfaceType]) 
-          material = space_shading_material
-        end
-        
-        all_geometries << geometry
+      if geometries
+        geometries.each_index do |i| 
+          geometry = geometries[i]
+          user_data = user_datas[i]
+          
+          material = nil
+          if /Site/.match(user_data[:surfaceType])
+            material = site_shading_material
+          elsif /Building/.match(user_data[:surfaceType]) 
+            material = building_shading_material
+          elsif /Space/.match(user_data[:surfaceType]) 
+            material = space_shading_material
+          end
+          
+          all_geometries << geometry
 
-        scene_child = SceneChild.new
-        scene_child.uuid = format_uuid(OpenStudio::createUUID) 
-        scene_child.name = user_data[:name]
-        scene_child.type = 'Mesh'
-        scene_child.geometry = geometry[:uuid]
-        scene_child.material = material[:uuid]
-        scene_child.matrix = identity_matrix
-        scene_child.userData = user_data
-        object[:children] << scene_child.to_h
+          scene_child = SceneChild.new
+          scene_child.uuid = format_uuid(OpenStudio::createUUID) 
+          scene_child.name = user_data[:name]
+          scene_child.type = 'Mesh'
+          scene_child.geometry = geometry[:uuid]
+          scene_child.material = material[:uuid]
+          scene_child.matrix = identity_matrix
+          scene_child.userData = user_data
+          object[:children] << scene_child.to_h
+        end
       end
-      
     end    
     
     # loop over all interior partition surfaces
